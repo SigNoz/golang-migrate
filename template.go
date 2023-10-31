@@ -26,26 +26,20 @@ func applyEnvironmentTemplate(body io.ReadCloser, logger Logger) (io.ReadCloser,
 	}
 
 	r, w := io.Pipe()
-	// we are using env map in gorutines without passing them as goroutine function arguments as we dont need seperate copies of the map in each go routine
-	// all operations in the goroutines involving the map are read only in nature
-	envMap := getEnvMap()
-	go func() {
+	em := getEnvMap()
+	go func(envMap map[string]string) {
 		err = tmpl.Execute(w, envMap)
 		if err != nil {
-			if logger != nil {
-				logger.Printf("applyEnvironmentTemplate: error executing template: %v", err)
-				if logger.Verbose() {
-					logger.Printf("applyEnvironmentTemplate: env map used for template execution: %v", envMap)
-				}
+			logger.Printf("applyEnvironmentTemplate: error executing template: %v", err)
+			if logger.Verbose() {
+				logger.Printf("applyEnvironmentTemplate: env map used for template execution: %v", envMap)
 			}
 		}
 		err = w.Close()
 		if err != nil {
-			if logger != nil {
-				logger.Printf("applyEnvironmentTemplate: error closing writer: %v", err)
-			}
+			logger.Printf("applyEnvironmentTemplate: error closing writer: %v", err)
 		}
-	}()
+	}(em)
 
 	return r, nil
 }
