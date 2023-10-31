@@ -3,6 +3,7 @@ package migrate
 import (
 	"fmt"
 	nurl "net/url"
+	"os"
 	"strings"
 )
 
@@ -58,4 +59,13 @@ func FilterCustomQuery(u *nurl.URL) *nurl.URL {
 	}
 	ux.RawQuery = vx.Encode()
 	return &ux
+}
+
+func getEnvMap() map[string]string {
+	envMapCache = make(map[string]string)
+	for _, kvp := range os.Environ() {
+		kvParts := strings.SplitN(kvp, "=", 2)
+		envMapCache[kvParts[0]] = kvParts[1]
+	}
+	return envMapCache
 }

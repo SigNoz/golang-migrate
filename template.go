@@ -3,29 +3,10 @@ package migrate
 import (
 	"fmt"
 	"io"
-	"os"
-	"strings"
-	"sync"
 	"text/template"
 )
 
 var envMapCache map[string]string
-var envMapCacheLock sync.Mutex
-
-func envMap() map[string]string {
-	// get the lock before accessing envMap to prevent concurrent reads and writes
-	envMapCacheLock.Lock()
-	defer envMapCacheLock.Unlock()
-	if envMapCache != nil {
-		return envMapCache
-	}
-	envMapCache = make(map[string]string)
-	for _, kvp := range os.Environ() {
-		kvParts := strings.SplitN(kvp, "=", 2)
-		envMapCache[kvParts[0]] = kvParts[1]
-	}
-	return envMapCache
-}
 
 func applyEnvironmentTemplate(body io.ReadCloser, logger Logger) (io.ReadCloser, error) {
 	bodyBytes, err := io.ReadAll(body)
@@ -45,15 +26,16 @@ func applyEnvironmentTemplate(body io.ReadCloser, logger Logger) (io.ReadCloser,
 	}
 
 	r, w := io.Pipe()
-
+	// we are using env map in gorutines without passing them as goroutine function arguments as we dont need seperate copies of the map in each go routine
+	// all operations in the goroutines involving the map are read only in nature
+	envMap := getEnvMap()
 	go func() {
-		em := envMap()
-		err = tmpl.Execute(w, em)
+		err = tmpl.Execute(w, envMap)
 		if err != nil {
 			if logger != nil {
 				logger.Printf("applyEnvironmentTemplate: error executing template: %v", err)
 				if logger.Verbose() {
-					logger.Printf("applyEnvironmentTemplate: env map used for template execution: %v", em)
+					logger.Printf("applyEnvironmentTemplate: env map used for template execution: %v", envMap)
 				}
 			}
 		}
