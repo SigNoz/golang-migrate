@@ -178,6 +178,24 @@ func (ch *ClickHouse) Version() (int, bool, error) {
 	return version, dirty == 1, nil
 }
 
+func (ch *ClickHouse) HostAddrs() ([]string, error) {
+	var hostAddrs []string
+	query := "SELECT DISTINCT host_address FROM system.clusters WHERE cluster = '" + ch.config.ClusterName + "'"
+	rows, err := ch.conn.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var hostAddr string
+		if err := rows.Scan(&hostAddr); err != nil {
+			return nil, err
+		}
+		hostAddrs = append(hostAddrs, hostAddr)
+	}
+	return hostAddrs, nil
+}
+
 func (ch *ClickHouse) SetVersion(version int, dirty bool) error {
 	var (
 		bool = func(v bool) uint8 {
@@ -192,15 +210,24 @@ func (ch *ClickHouse) SetVersion(version int, dirty bool) error {
 		return err
 	}
 
-	query := fmt.Sprintf(
-		"INSERT INTO %s (version, dirty, sequence) VALUES (%d, %d, %d)",
-		ch.config.MigrationsTable,
-		version,
-		bool(dirty),
-		time.Now().UnixNano(),
-	)
-	if _, err := tx.Exec(query, version, bool(dirty), time.Now().UnixNano()); err != nil {
-		return &database.Error{OrigErr: err, Query: []byte(query)}
+	hostAddrs, err := ch.HostAddrs()
+	if err != nil {
+		return err
+	}
+	timeNow := time.Now().UnixNano()
+
+	for _, hostAddr := range hostAddrs {
+		query := fmt.Sprintf(
+			"INSERT INTO FUNCTION remote('%s', %s) VALUES (%d, %d, %d)",
+			hostAddr,
+			ch.config.MigrationsTable,
+			version,
+			bool(dirty),
+			timeNow,
+		)
+		if _, err := tx.Exec(query); err != nil {
+			return &database.Error{OrigErr: err, Query: []byte(query)}
+		}
 	}
 
 	return tx.Commit()
@@ -224,35 +251,12 @@ func (ch *ClickHouse) ensureVersionTable() (err error) {
 		}
 	}()
 
-	var (
-		table string
-		query = "SHOW TABLES FROM " + ch.config.DatabaseName + " LIKE '" + ch.config.MigrationsTable + "'"
-	)
-	// check if migration table exists
-	if err := ch.conn.QueryRow(query).Scan(&table); err != nil {
-		if err != sql.ErrNoRows {
-			return &database.Error{OrigErr: err, Query: []byte(query)}
-		}
-	} else {
-		return nil
-	}
-
-	// if not, create the empty migration table
-	if len(ch.config.ClusterName) > 0 {
-		query = fmt.Sprintf(`
-			CREATE TABLE %s ON CLUSTER %s (
-				version    Int64,
-				dirty      UInt8,
-				sequence   UInt64
-			) Engine=%s`, ch.config.MigrationsTable, ch.config.ClusterName, ch.config.MigrationsTableEngine)
-	} else {
-		query = fmt.Sprintf(`
-			CREATE TABLE %s (
-				version    Int64,
-				dirty      UInt8,
-				sequence   UInt64
-			) Engine=%s`, ch.config.MigrationsTable, ch.config.MigrationsTableEngine)
-	}
+	query := fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s ON CLUSTER %s (
+			version    Int64,
+			dirty      UInt8,
+			sequence   UInt64
+		) Engine=%s`, ch.config.MigrationsTable, ch.config.ClusterName, ch.config.MigrationsTableEngine)
 
 	if strings.HasSuffix(ch.config.MigrationsTableEngine, "Tree") {
 		query = fmt.Sprintf(`%s ORDER BY sequence`, query)
