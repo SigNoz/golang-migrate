@@ -219,8 +219,9 @@ func (ch *ClickHouse) SetVersion(version int, dirty bool) error {
 	// insert into remote table(s)
 	for _, hostAddr := range hostAddrs {
 		query := fmt.Sprintf(
-			"INSERT INTO FUNCTION remote('%s', %s) VALUES (%d, %d, %d)",
+			"INSERT INTO FUNCTION remote('%s', %s, %s) VALUES (%d, %d, %d)",
 			hostAddr,
+			ch.config.DatabaseName,
 			ch.config.MigrationsTable,
 			version,
 			bool(dirty),
