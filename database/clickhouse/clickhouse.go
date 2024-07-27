@@ -180,7 +180,7 @@ func (ch *ClickHouse) Version() (int, bool, error) {
 
 func (ch *ClickHouse) HostAddrs() ([]string, error) {
 	var hostAddrs []string
-	query := "SELECT DISTINCT host_address FROM system.clusters WHERE cluster = '" + ch.config.ClusterName + "'"
+	query := "SELECT DISTINCT host_address FROM system.clusters WHERE host_address NOT IN ['localhost', '127.0.0.1'] AND cluster = '" + ch.config.ClusterName + "'"
 	rows, err := ch.conn.Query(query)
 	if err != nil {
 		return nil, err
@@ -216,6 +216,7 @@ func (ch *ClickHouse) SetVersion(version int, dirty bool) error {
 	}
 	timeNow := time.Now().UnixNano()
 
+	// insert into remote table(s)
 	for _, hostAddr := range hostAddrs {
 		query := fmt.Sprintf(
 			"INSERT INTO FUNCTION remote('%s', %s) VALUES (%d, %d, %d)",
@@ -230,6 +231,17 @@ func (ch *ClickHouse) SetVersion(version int, dirty bool) error {
 		}
 	}
 
+	// insert into local table
+	query := fmt.Sprintf(
+		"INSERT INTO %s VALUES (%d, %d, %d)",
+		ch.config.MigrationsTable,
+		version,
+		bool(dirty),
+		timeNow,
+	)
+	if _, err := tx.Exec(query); err != nil {
+		return &database.Error{OrigErr: err, Query: []byte(query)}
+	}
 	return tx.Commit()
 }
 
