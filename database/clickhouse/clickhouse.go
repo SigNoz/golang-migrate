@@ -194,12 +194,14 @@ func (ch *ClickHouse) HostAddrs() ([]string, error) {
 	query := "SELECT DISTINCT host_address FROM system.clusters WHERE host_address NOT IN ['localhost', '127.0.0.1'] AND cluster = '" + ch.config.ClusterName + "'"
 	rows, err := ch.conn.Query(query)
 	if err != nil {
+		fmt.Println("err in fetch host addrs", err)
 		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var hostAddr string
 		if err := rows.Scan(&hostAddr); err != nil {
+			fmt.Println("err in scan host addrs", err)
 			return nil, err
 		}
 		hostAddrs[hostAddr] = struct{}{}
@@ -215,16 +217,19 @@ func (ch *ClickHouse) HostAddrs() ([]string, error) {
 			ch.url.Host = hostAddr + ":" + port
 			conn, err := sql.Open("clickhouse", ch.url.String())
 			if err != nil {
+				fmt.Println("err in open conn", err)
 				return nil, err
 			}
 			rows, err := conn.Query(query)
 			if err != nil {
+				fmt.Println("err in query host addrs", err)
 				return nil, err
 			}
 			defer rows.Close()
 			for rows.Next() {
 				var hostAddr string
 				if err := rows.Scan(&hostAddr); err != nil {
+					fmt.Println("err in scan host addrs", err)
 					return nil, err
 				}
 				hostAddrs[hostAddr] = struct{}{}
@@ -256,13 +261,16 @@ func (ch *ClickHouse) SetVersion(version int, dirty bool) error {
 	}
 
 	hostAddrs, err := ch.HostAddrs()
+	fmt.Println("hostAddrs", hostAddrs)
 	if err != nil {
+		fmt.Println("err in fetch host addrs", err)
 		return err
 	}
 	timeNow := time.Now().UnixNano()
 
 	// insert into remote table(s)
 	for _, hostAddr := range hostAddrs {
+		fmt.Println("insert into remote table", hostAddr)
 		query := fmt.Sprintf(
 			"INSERT INTO FUNCTION remote('%s', %s, %s) VALUES (%d, %d, %d)",
 			hostAddr,
@@ -273,6 +281,7 @@ func (ch *ClickHouse) SetVersion(version int, dirty bool) error {
 			timeNow,
 		)
 		if _, err := tx.Exec(query); err != nil {
+			fmt.Println("err in exec", err)
 			return &database.Error{OrigErr: err, Query: []byte(query)}
 		}
 	}
