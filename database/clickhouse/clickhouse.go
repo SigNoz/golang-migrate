@@ -82,7 +82,6 @@ func (ch *ClickHouse) Open(dsn string) (database.Driver, error) {
 	if err != nil {
 		return nil, err
 	}
-	ch.url = q
 
 	multiStatementMaxSize := DefaultMultiStatementMaxSize
 	if s := purl.Query().Get("x-multi-statement-max-size"); len(s) > 0 {
@@ -107,6 +106,7 @@ func (ch *ClickHouse) Open(dsn string) (database.Driver, error) {
 			MultiStatementEnabled: purl.Query().Get("x-multi-statement") == "true",
 			MultiStatementMaxSize: multiStatementMaxSize,
 		},
+		url: q,
 	}
 
 	if err := ch.init(); err != nil {
