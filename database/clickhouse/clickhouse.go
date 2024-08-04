@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/atomic"
@@ -65,6 +66,9 @@ type ClickHouse struct {
 	conn     *sql.DB
 	config   *Config
 	isLocked atomic.Bool
+	url      *url.URL
+	addrs    []string
+	addrsMux sync.Mutex
 }
 
 func (ch *ClickHouse) Open(dsn string) (database.Driver, error) {
@@ -78,6 +82,7 @@ func (ch *ClickHouse) Open(dsn string) (database.Driver, error) {
 	if err != nil {
 		return nil, err
 	}
+	ch.url = q
 
 	multiStatementMaxSize := DefaultMultiStatementMaxSize
 	if s := purl.Query().Get("x-multi-statement-max-size"); len(s) > 0 {
@@ -179,7 +184,13 @@ func (ch *ClickHouse) Version() (int, bool, error) {
 }
 
 func (ch *ClickHouse) HostAddrs() ([]string, error) {
-	var hostAddrs []string
+	ch.addrsMux.Lock()
+	defer ch.addrsMux.Unlock()
+	if len(ch.addrs) != 0 {
+		return ch.addrs, nil
+	}
+
+	hostAddrs := make(map[string]struct{})
 	query := "SELECT DISTINCT host_address FROM system.clusters WHERE host_address NOT IN ['localhost', '127.0.0.1'] AND cluster = '" + ch.config.ClusterName + "'"
 	rows, err := ch.conn.Query(query)
 	if err != nil {
@@ -191,9 +202,39 @@ func (ch *ClickHouse) HostAddrs() ([]string, error) {
 		if err := rows.Scan(&hostAddr); err != nil {
 			return nil, err
 		}
-		hostAddrs = append(hostAddrs, hostAddr)
+		hostAddrs[hostAddr] = struct{}{}
 	}
-	return hostAddrs, nil
+
+	if len(hostAddrs) != 0 {
+		// connect to other host and do the same thing
+		for hostAddr := range hostAddrs {
+			ch.url.Host = hostAddr
+			conn, err := sql.Open("clickhouse", ch.url.String())
+			if err != nil {
+				return nil, err
+			}
+			rows, err := conn.Query(query)
+			if err != nil {
+				return nil, err
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var hostAddr string
+				if err := rows.Scan(&hostAddr); err != nil {
+					return nil, err
+				}
+				hostAddrs[hostAddr] = struct{}{}
+			}
+			break
+		}
+	}
+
+	addrs := make([]string, 0, len(hostAddrs))
+	for addr := range hostAddrs {
+		addrs = append(addrs, addr)
+	}
+	ch.addrs = addrs
+	return addrs, nil
 }
 
 func (ch *ClickHouse) SetVersion(version int, dirty bool) error {
