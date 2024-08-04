@@ -208,7 +208,11 @@ func (ch *ClickHouse) HostAddrs() ([]string, error) {
 	if len(hostAddrs) != 0 {
 		// connect to other host and do the same thing
 		for hostAddr := range hostAddrs {
-			ch.url.Host = hostAddr
+			port := ch.url.Port()
+			if port == "" {
+				port = "9000"
+			}
+			ch.url.Host = hostAddr + ":" + port
 			conn, err := sql.Open("clickhouse", ch.url.String())
 			if err != nil {
 				return nil, err
