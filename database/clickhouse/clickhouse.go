@@ -272,18 +272,6 @@ func (ch *ClickHouse) SetVersion(version int, dirty bool) error {
 			return &database.Error{OrigErr: err, Query: []byte(query)}
 		}
 	}
-
-	// insert into local table
-	query := fmt.Sprintf(
-		"INSERT INTO %s VALUES (%d, %d, %d)",
-		ch.config.MigrationsTable,
-		version,
-		bool(dirty),
-		timeNow,
-	)
-	if _, err := tx.Exec(query); err != nil {
-		return &database.Error{OrigErr: err, Query: []byte(query)}
-	}
 	return tx.Commit()
 }
 
