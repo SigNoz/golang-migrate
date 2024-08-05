@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/atomic"
@@ -65,6 +66,9 @@ type ClickHouse struct {
 	conn     *sql.DB
 	config   *Config
 	isLocked atomic.Bool
+	url      *url.URL
+	addrs    []string
+	addrsMux sync.Mutex
 }
 
 func (ch *ClickHouse) Open(dsn string) (database.Driver, error) {
@@ -102,6 +106,7 @@ func (ch *ClickHouse) Open(dsn string) (database.Driver, error) {
 			MultiStatementEnabled: purl.Query().Get("x-multi-statement") == "true",
 			MultiStatementMaxSize: multiStatementMaxSize,
 		},
+		url: q,
 	}
 
 	if err := ch.init(); err != nil {
@@ -178,6 +183,64 @@ func (ch *ClickHouse) Version() (int, bool, error) {
 	return version, dirty == 1, nil
 }
 
+func (ch *ClickHouse) HostAddrs() ([]string, error) {
+	ch.addrsMux.Lock()
+	defer ch.addrsMux.Unlock()
+	if len(ch.addrs) != 0 {
+		return ch.addrs, nil
+	}
+
+	hostAddrs := make(map[string]struct{})
+	query := "SELECT DISTINCT host_address FROM system.clusters WHERE host_address NOT IN ['localhost', '127.0.0.1'] AND cluster = '" + ch.config.ClusterName + "'"
+	rows, err := ch.conn.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var hostAddr string
+		if err := rows.Scan(&hostAddr); err != nil {
+			return nil, err
+		}
+		hostAddrs[hostAddr] = struct{}{}
+	}
+
+	if len(hostAddrs) != 0 {
+		// connect to other host and do the same thing
+		for hostAddr := range hostAddrs {
+			port := ch.url.Port()
+			if port == "" {
+				port = "9000"
+			}
+			ch.url.Host = hostAddr + ":" + port
+			conn, err := sql.Open("clickhouse", ch.url.String())
+			if err != nil {
+				return nil, err
+			}
+			rows, err := conn.Query(query)
+			if err != nil {
+				return nil, err
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var hostAddr string
+				if err := rows.Scan(&hostAddr); err != nil {
+					return nil, err
+				}
+				hostAddrs[hostAddr] = struct{}{}
+			}
+			break
+		}
+	}
+
+	addrs := make([]string, 0, len(hostAddrs))
+	for addr := range hostAddrs {
+		addrs = append(addrs, addr)
+	}
+	ch.addrs = addrs
+	return addrs, nil
+}
+
 func (ch *ClickHouse) SetVersion(version int, dirty bool) error {
 	var (
 		bool = func(v bool) uint8 {
@@ -192,17 +255,27 @@ func (ch *ClickHouse) SetVersion(version int, dirty bool) error {
 		return err
 	}
 
-	query := fmt.Sprintf(
-		"INSERT INTO %s (version, dirty, sequence) VALUES (%d, %d, %d)",
-		ch.config.MigrationsTable,
-		version,
-		bool(dirty),
-		time.Now().UnixNano(),
-	)
-	if _, err := tx.Exec(query, version, bool(dirty), time.Now().UnixNano()); err != nil {
-		return &database.Error{OrigErr: err, Query: []byte(query)}
+	hostAddrs, err := ch.HostAddrs()
+	if err != nil {
+		return err
 	}
+	timeNow := time.Now().UnixNano()
 
+	// insert into remote table(s)
+	for _, hostAddr := range hostAddrs {
+		query := fmt.Sprintf(
+			"INSERT INTO FUNCTION remote('%s', %s, %s) VALUES (%d, %d, %d)",
+			hostAddr,
+			ch.config.DatabaseName,
+			ch.config.MigrationsTable,
+			version,
+			bool(dirty),
+			timeNow,
+		)
+		if _, err := tx.Exec(query); err != nil {
+			return &database.Error{OrigErr: err, Query: []byte(query)}
+		}
+	}
 	return tx.Commit()
 }
 
@@ -224,35 +297,12 @@ func (ch *ClickHouse) ensureVersionTable() (err error) {
 		}
 	}()
 
-	var (
-		table string
-		query = "SHOW TABLES FROM " + ch.config.DatabaseName + " LIKE '" + ch.config.MigrationsTable + "'"
-	)
-	// check if migration table exists
-	if err := ch.conn.QueryRow(query).Scan(&table); err != nil {
-		if err != sql.ErrNoRows {
-			return &database.Error{OrigErr: err, Query: []byte(query)}
-		}
-	} else {
-		return nil
-	}
-
-	// if not, create the empty migration table
-	if len(ch.config.ClusterName) > 0 {
-		query = fmt.Sprintf(`
-			CREATE TABLE %s ON CLUSTER %s (
-				version    Int64,
-				dirty      UInt8,
-				sequence   UInt64
-			) Engine=%s`, ch.config.MigrationsTable, ch.config.ClusterName, ch.config.MigrationsTableEngine)
-	} else {
-		query = fmt.Sprintf(`
-			CREATE TABLE %s (
-				version    Int64,
-				dirty      UInt8,
-				sequence   UInt64
-			) Engine=%s`, ch.config.MigrationsTable, ch.config.MigrationsTableEngine)
-	}
+	query := fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s ON CLUSTER %s (
+			version    Int64,
+			dirty      UInt8,
+			sequence   UInt64
+		) Engine=%s`, ch.config.MigrationsTable, ch.config.ClusterName, ch.config.MigrationsTableEngine)
 
 	if strings.HasSuffix(ch.config.MigrationsTableEngine, "Tree") {
 		query = fmt.Sprintf(`%s ORDER BY sequence`, query)
